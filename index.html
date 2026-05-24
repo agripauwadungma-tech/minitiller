@@ -1164,7 +1164,7 @@ function loadApp() {
     : '50px 1fr 1.2fr 1.2fr 120px 80px 90px 90px 70px';
   document.querySelectorAll('.table-header-row,.data-row').forEach(r => r.style.gridTemplateColumns = cols);
 
-  renderTable();
+  loadEntries();
   if(isAdmin) renderUsers();
   showToast('✅ स्वागत छ, ' + currentUser.name + '!');
 }
@@ -1173,7 +1173,6 @@ function loadApp() {
 window.addEventListener('DOMContentLoaded', () => {
   const sess = sessionStorage.getItem('pgm_session');
   if(sess) { currentUser = JSON.parse(sess); loadApp(); }
-  else renderTable(); // pre-render for stats
 });
 
 // ========== TAB NAV ==========
@@ -1185,13 +1184,83 @@ function showTab(id, btn) {
   if(id==='tabAdmin') renderUsers();
 }
 
+// ========== SUPABASE CONFIG ==========
+const SB_URL = 'https://zodknjylbqvfclywxtfe.supabase.co';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvZGtuanlsYnF2ZmNseXd4dGZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk2MzQ4NzQsImV4cCI6MjA5NTIxMDg3NH0.bDCZC9qi4MVyn9EC2bS0NboNU_vNe3BcPnEWdQDbNrM';
+
+const sbHeaders = {
+  'Content-Type': 'application/json',
+  'apikey': SB_KEY,
+  'Authorization': 'Bearer ' + SB_KEY,
+  'Prefer': 'return=representation'
+};
+
+async function sbFetch(path, options={}) {
+  const res = await fetch(SB_URL + '/rest/v1/' + path, {
+    ...options,
+    headers: { ...sbHeaders, ...(options.headers||{}) }
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
 // ========== DATA STORE ==========
-let entries = JSON.parse(localStorage.getItem('miniTillerData') || '[]');
+let entries = [];
 let thumbDataURL = null;
 let photoDataURL = null;
 let editingEntryId = null;
 
-function saveData() { localStorage.setItem('miniTillerData', JSON.stringify(entries)); }
+async function loadEntries() {
+  try {
+    showToast('⏳ डेटा लोड हुँदैछ...');
+    const data = await sbFetch('tiller%20entry?order=created_at.asc&select=*');
+    entries = data.map(e => ({
+      id: e.id,
+      name: e.name,
+      ward: e.ward,
+      village: e.village || '',
+      citizen: e.citizen || '',
+      pan: e.pan || '',
+      phone: e.phone || '',
+      tiller: e.tiller,
+      thumb: e.thumb || null,
+      photo: e.photo || null,
+      date: e.date || ''
+    }));
+    renderTable();
+    showToast('✅ डेटा लोड भयो।');
+  } catch(err) {
+    showToast('❌ डेटा लोड गर्न सकिएन: ' + err.message, 'error');
+  }
+}
+
+async function saveData() {
+  // Supabase मा save हुन्छ — saveEntry ले handle गर्छ
+}
+
+async function sbInsert(entry) {
+  return await sbFetch('tiller%20entry', {
+    method: 'POST',
+    body: JSON.stringify(entry)
+  });
+}
+
+async function sbUpdate(id, entry) {
+  return await sbFetch('tiller%20entry?id=eq.' + id, {
+    method: 'PATCH',
+    body: JSON.stringify(entry)
+  });
+}
+
+async function sbDelete(id) {
+  return await sbFetch('tiller%20entry?id=eq.' + id, {
+    method: 'DELETE'
+  });
+}
 
 function updateStats() {
   const total = entries.reduce((s,e)=>s+(parseInt(e.tiller)||0),0);
@@ -1473,37 +1542,60 @@ function closeEntryModal() { document.getElementById('entryModalOverlay').classL
 
 function editEntry(id) { openEntryModal(id); }
 
-function saveEntry() {
+async function saveEntry() {
   const name=document.getElementById('f_name').value.trim();
   const ward=document.getElementById('f_ward').value;
   const citizen=document.getElementById('f_citizen').value.trim();
   const phone=document.getElementById('f_phone').value.trim();
   const tiller=document.getElementById('f_tiller').value;
-  if(!name){alert('नाम आवश्यक छ।');return}
-if(!ward){alert('वडा नं. छान्नुहोस्।');return}
-if(!citizen){alert('नागरिकता नं. आवश्यक छ।');return}
-if(!phone){alert('सम्पर्क नं. आवश्यक छ।');return}
-if(!tiller||tiller<1){alert('मिनि टिलर संख्या भर्नुहोस्।');return}
+  const village=document.getElementById('f_village').value.trim();
+  const pan=document.getElementById('f_pan').value.trim();
 
-  if(editingEntryId) {
-    const idx=entries.findIndex(x=>x.id===editingEntryId);
-    if(idx>-1){
-      entries[idx]={...entries[idx],name,ward,village:document.getElementById('f_village').value.trim(),citizen,pan:document.getElementById('f_pan').value.trim(),phone,tiller:parseInt(tiller),thumb:thumbDataURL,photo:photoDataURL};
+  if(!name){showToast('नाम आवश्यक छ।','error');return}
+  if(!ward){showToast('वडा नं. छान्नुहोस्।','error');return}
+  if(!citizen){showToast('नागरिकता नं. आवश्यक छ।','error');return}
+  if(!phone){showToast('सम्पर्क नं. आवश्यक छ।','error');return}
+  if(!tiller||tiller<1){showToast('मिनि टिलर संख्या भर्नुहोस्।','error');return}
+
+  const payload = {name,ward,village,citizen,pan,phone,tiller:parseInt(tiller),thumb:thumbDataURL,photo:photoDataURL};
+
+  try {
+    if(editingEntryId) {
+      await sbUpdate(editingEntryId, payload);
+      showToast('✅ रेकर्ड अद्यावधिक गरियो।');
+    } else {
+      const toDevanagari = n => String(n).replace(/\d/g, d=>'०१२३४५६७८९'[d]);
+      function toBS(date){
+        const bsData={2080:[31,32,31,32,31,30,30,30,29,29,30,30],2081:[31,31,32,32,31,30,30,30,29,30,30,30],2082:[31,32,31,32,31,30,30,30,29,30,30,30],2083:[31,32,31,32,31,30,30,30,29,30,30,30]};
+        let bsY=2081,bsM=1,bsD=1;
+        const adBase=new Date(2024,3,13);
+        let days=Math.round((date-adBase)/(1000*60*60*24));
+        while(days>0){const md=bsData[bsY];if(!md){bsY++;bsM=1;continue;}const dim=md[bsM-1];if(days<dim-bsD+1){bsD+=days;days=0;}else{days-=(dim-bsD+1);bsD=1;bsM++;if(bsM>12){bsM=1;bsY++;}}}
+        const months=['बैशाख','जेठ','असार','साउन','भाद्र','असोज','कार्तिक','मंसिर','पुस','माघ','फागुन','चैत'];
+        return toDevanagari(bsY)+' '+months[bsM-1]+' '+toDevanagari(bsD);
+      }
+      payload.date = toBS(new Date());
+      await sbInsert(payload);
+      showToast('✅ नयाँ लाभग्राही दर्ता गरियो।');
     }
-    alert('✅ रेकर्ड अद्यावधिक गरियो।');
-  } else {
-    entries.push({id:Date.now(),name,ward,village:document.getElementById('f_village').value.trim(),citizen,pan:document.getElementById('f_pan').value.trim(),phone,tiller:parseInt(tiller),thumb:thumbDataURL,photo:photoDataURL,date:new Date().toLocaleDateString('ne-NP')});
-    alert('✅ नयाँ लाभग्राही दर्ता गरियो।');
+    closeEntryModal();
+    await loadEntries();
+  } catch(err) {
+    showToast('❌ सुरक्षित गर्न सकिएन: ' + err.message, 'error');
   }
-  saveData(); closeEntryModal(); renderTable();
 }
 
 function confirmDeleteEntry(id,name) {
   document.getElementById('deleteConfirmText').textContent=`"${name}" को रेकर्ड हटाउने?`;
-  document.getElementById('deleteConfirmBtn').onclick=()=>{
-    entries=entries.filter(e=>e.id!==id);
-    saveData(); renderTable(); closeDeleteModal();
-    showToast('🗑️ रेकर्ड हटाइयो।');
+  document.getElementById('deleteConfirmBtn').onclick=async()=>{
+    try {
+      await sbDelete(id);
+      closeDeleteModal();
+      await loadEntries();
+      showToast('🗑️ रेकर्ड हटाइयो।');
+    } catch(err) {
+      showToast('❌ हटाउन सकिएन: ' + err.message, 'error');
+    }
   };
   document.getElementById('deleteModalOverlay').classList.add('open');
 }
